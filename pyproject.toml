@@ -1,0 +1,20 @@
+[project]
+name = "wx-pptx-gui"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "==3.10.*"
+dependencies = [
+    "kokoro",
+    "moviepy",
+    "natsort",
+    "pandas",
+    "pip",
+    "python-pptx",
+    "soundfile",
+    "torch>=2.8.0,<2.9.0",
+    "torchaudio>=2.8.0,<2.9.0",
+    "torchcodec<=0.7",
+    "whisperx",
+    "wxpython",
+]
