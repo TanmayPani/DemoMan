@@ -1,6 +1,5 @@
 import wx
 import sys
-import pptx
 import spacy
 from os import path, listdir, makedirs, rename, environ, pathsep
 import multiprocessing
@@ -29,10 +28,10 @@ def get_model_path(mname):
     if getattr(sys, "frozen", False):
         base_path = sys._MEIPASS
     else:
-        base_path = os.path.abspath(".")
+        base_path = path.abspath(".")
     # environ['KOKORO_MODEL_DIR'] = path.join(base_path, 'models')
     # Point to the folder containing your .pth files
-    return os.path.join(base_path, mname)
+    return path.join(base_path, mname)
 
 
 setup_ffmpeg()
@@ -62,17 +61,17 @@ setup_ffmpeg()
 def load_spacy_model():
     if hasattr(sys, "_MEIPASS"):
         # Start at the root of your model collection
-        base_search_path = os.path.join(sys._MEIPASS, "en_core_web_sm")
+        base_search_path = path.join(sys._MEIPASS, "en_core_web_sm")
 
         # 1. Check if the config is right here
-        if os.path.exists(os.path.join(base_search_path, "config.cfg")):
+        if path.exists(path.join(base_search_path, "config.cfg")):
             return base_search_path
 
         # 2. Check one level deeper (for that 3.8.0 folder)
-        if os.path.exists(base_search_path):
-            for folder in os.listdir(base_search_path):
-                subfolder = os.path.join(base_search_path, folder)
-                if os.path.isdir(subfolder) and "config.cfg" in os.listdir(subfolder):
+        if path.exists(base_search_path):
+            for folder in listdir(base_search_path):
+                subfolder = path.join(base_search_path, folder)
+                if path.isdir(subfolder) and "config.cfg" in listdir(subfolder):
                     return subfolder
 
     return "en_core_web_sm"  # Dev fallback
@@ -113,9 +112,6 @@ import ctranslate2
 from re import findall, sub
 import soundfile as sf
 from pathlib import Path
-from pptx.util import Pt
-from pptx.util import Cm
-from pptx.util import Inches
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from kokoro.pipeline import KPipeline
 from threading import Thread
@@ -123,92 +119,167 @@ from pandas import read_excel, read_pickle, DataFrame, read_csv
 from moviepy import concatenate_videoclips, concatenate_audioclips
 from moviepy import VideoFileClip, AudioFileClip, CompositeAudioClip
 
-from wxSlides import wxPresentation
+from wxSlides import wxPresentation, wxTextBox
 
 
-class PageOne(wx.Panel):
-    def __init__(self, parent):
-        wx.Panel.__init__(self, parent)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+def SafeLog(message):
+    if wx.IsMainThread():
+        wx.LogMessage(message)
+    else:
+        wx.CallAfter(wx.LogMessage, message)
+
+
+def ComponentWriter(fpath, name, comps):
+    with open(fpath + name, "wb") as f:
+        pickle.dump(comps, f)
+
+
+def ComponentReader(fpath, name):
+    with open(fpath + name, "rb") as f:
+        comps = pickle.load(f)
+    return comps
+
+
+def StandardizedExcelReader(fpath):
+    Files = [i for i in listdir(fpath) if ".xlsm" in i or ".xlsx" in i]
+    # print(Files)
+    FullSheet = read_excel(fpath + Files[0], sheet_name=None)
+    SheetData = FullSheet.items()
+    keys, dfs = [[] for i in range(2)]
+    for key, df in SheetData:
+        keys.append(key)
+        dfs.append(df)
+
+    StepKeys, StepPIDs, StepTools = [[] for i in range(3)]
+    count = 0
+    for i in dfs:
+        if len(i["Item number"]) > 0:
+            mask = i["Item number"] == "Tool"
+            i["grouper"] = mask.cumsum()
+            ig = {group_key: group_df for group_key, group_df in i.groupby("grouper")}
+            ig[1].columns = ig[1].iloc[0]
+            ig[1] = ig[1].loc[:, :"Quantity"]
+            StepKeys.append(keys[count])
+            StepPIDs.append(
+                ig[0].dropna().reset_index(drop=True).drop(["grouper"], axis=1)
+            )
+            StepTools.append(
+                ig[1]["Tool Description"].dropna().reset_index(drop=True)[1:]
+            )
+
+        count += 1
+    return keys, StepPIDs, StepTools
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 class Thor(wx.Frame):
     def __init__(self, parent, id, nlp):
-        wx.Frame.__init__(
-            self,
+        super().__init__(
             parent,
             id,
             "Thorlabs Instruction Transcription Interface",
-            size=(1000, 600),
+            size=(1500, 1500),
         )
         self.nlp = nlp
 
         # wx.Frame.__init__(self,parent,id,'Thorlabs Origin Interface',size=(750,500))
 
-        panel = wx.Panel(self)
+        self.panel = wx.Panel(self)
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-        self.presMaker = wxPresentation(panel)
-        sizer = wx.BoxSizer()
-        sizer.Add(self.presMaker, 1, wx.EXPAND)
-        panel.SetSizer(sizer)
+        self.presMaker = wxPresentation(self.panel)
 
-        self.yoffset = 50
-        Choices = ["Original", "Rewrite"]
-        buttonSizer = wx.StaticBoxSizer(wx.VERTICAL, self.presMaker.GetPage(0))
-        CPS = wx.Button(self.presMaker.GetPage(0), label="Core Path")
-        self.Bind(wx.EVT_BUTTON, self.PathSelector, CPS)
+        # Displaying Text
+        # font = wx.Font(10, wx.DECORATIVE, wx.NORMAL, wx.BOLD)
+        buttonSizer = wx.StaticBoxSizer(wx.VERTICAL, self.panel)
+
+        self.BOMWriterCB = wx.ComboBox(
+            buttonSizer.StaticBox,
+            wx.ID_ANY,
+            choices=["No BOM", "BOM"],
+            style=wx.CB_READONLY,
+        )
+        self.BOMWriterCB.SetValue("No BOM")
+        buttonSizer.Add(
+            self.BOMWriterCB, wx.SizerFlags(0).Align(wx.TOP).Border(wx.ALL, 10)
+        )
+
+        CPS = wx.Button(buttonSizer.StaticBox, label="Core Path")
         buttonSizer.Add(CPS, wx.SizerFlags(0).Align(wx.TOP).Border(wx.ALL, 10))
 
         self.VideoCombButton = wx.Button(
-            self.presMaker.GetPage(0), label="Video Compressor"
+            buttonSizer.StaticBox, label="Video Compressor"
         )
-        self.Bind(wx.EVT_BUTTON, self.VideoCombination, self.VideoCombButton)
         buttonSizer.Add(
             self.VideoCombButton, wx.SizerFlags(0).Align(wx.TOP).Border(wx.ALL, 10)
         )
 
-        self.VideoSliceButton = wx.Button(
-            self.presMaker.GetPage(0), label="Video Slicer"
-        )
-        self.Bind(wx.EVT_BUTTON, self.TranscriptionModel, self.VideoSliceButton)
+        self.VideoSliceButton = wx.Button(buttonSizer.StaticBox, label="Video Slicer")
         buttonSizer.Add(
             self.VideoSliceButton, wx.SizerFlags(0).Align(wx.TOP).Border(wx.ALL, 10)
         )
+
+        # self.LCB = wx.StaticText(buttonSizer.StaticBox, -1, "Audio Transcription")
+        # self.AudioWriterCB = wx.ComboBox(
+        #    buttonSizer.StaticBox,
+        #    wx.ID_ANY,
+        #    choices=["Original", "Rewrite"],
+        #    style=wx.CB_READONLY,
+        # )
+        # self.AudioWriterCB.SetValue("Original")
+        # buttonSizer.Add(self.LCB, wx.SizerFlags(0).Align(wx.TOP).Border(wx.ALL, 10))
+        # buttonSizer.Add(
+        #    self.AudioWriterCB, wx.SizerFlags(0).Align(wx.TOP).Border(wx.ALL, 10)
+        # )
+        # self.LCB.Hide()
+        # self.AudioWriterCB.Hide()
+
+        mainSizer = wx.BoxSizer(wx.VERTICAL)
+        middleSizer = wx.BoxSizer(wx.HORIZONTAL)
+        middleSizer.Add(buttonSizer, 0, wx.EXPAND | wx.TOP | wx.RIGHT, 10)
+        middleSizer.Add(self.presMaker, 1, wx.EXPAND | wx.TOP | wx.RIGHT, 10)
+        mainSizer.Add(middleSizer, 1, wx.EXPAND | wx.ALL, 10)
+
+        self.saveFileTBox = wxTextBox(self.panel, title="File Name")
+        self.saveFileTBox.Text = "example_presentation"
+        self.saveFileButton = wx.Button(self.saveFileTBox.StaticBox, label="Save")
+        self.saveFileButton.Disable()
+        self.saveFileTBox.Add(self.saveFileButton, wx.SizerFlags(0).Border())
+        mainSizer.Add(self.saveFileTBox, wx.SizerFlags(0).Expand().Border())
+
+        self.logCtrl = wx.TextCtrl(self.panel, style=wx.TE_MULTILINE | wx.TE_READONLY)
+        self.logCtrl.Hide()
+        mainSizer.Add(self.logCtrl, 1, wx.EXPAND | wx.ALL, 10)
+
+        self.showLogButton = wx.ToggleButton(self.panel, label="Show Log")
+        mainSizer.Add(
+            self.showLogButton,
+            wx.SizerFlags(0).Align(wx.BOTTOM | wx.LEFT).Border(wx.ALL, 10),
+        )
+
+        self.panel.SetSizer(mainSizer)
+
+        self.logger = wx.LogTextCtrl(self.logCtrl)
+        wx.Log.SetActiveTarget(self.logger)
+
+        # self.Bind(wx.EVT_COMBOBOX, self.on_combo_selection, self.AudioWriterCB)
+        # self.Bind(wx.EVT_COMBOBOX, self.BOMSelection, self.BOMWriterCB)
+        self.Bind(wx.EVT_BUTTON, self.PathSelector, CPS)
+        self.Bind(wx.EVT_BUTTON, self.VideoCombination, self.VideoCombButton)
+        self.Bind(wx.EVT_BUTTON, self.TranscriptionModel, self.VideoSliceButton)
+        self.Bind(wx.EVT_TOGGLEBUTTON, self.OnToggleLog, self.showLogButton)
+        self.Bind(wx.EVT_BUTTON, self.OnSavePPTX, self.saveFileButton)
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
         self.CorePath = None
-        self.CorePathSelector = None
         self.StructurePath = None
-        self.VideoSliceButton = None
-        self.VideoCombButton = None
         self.AudioPath = None
         self.VideoPath = None
         self.TextPath = None
         self.SegPath = None
-        self.BOMWriterCB = None
-        self.LCB = wx.StaticText(
-            page1, -1, "Audio Transcription", pos=(40, 340 + self.yoffset)
-        )
-        self.LCB.Hide()
-        self.AudioWriterCB = wx.ComboBox(
-            page1,
-            wx.ID_ANY,
-            choices=Choices,
-            style=wx.CB_READONLY,
-            pos=(40, 360 + self.yoffset),
-        )
-        self.AudioWriterCB.SetValue("Original")
-        self.Bind(wx.EVT_COMBOBOX, self.on_combo_selection, self.AudioWriterCB)
-        self.AudioWriterCB.Hide()
-        self.Layout()
-        BOMChoices = ["No BOM", "BOM"]
-        # self.LBW = wx.StaticText(page1,-1,'BOM Availability',pos=(40,10 +self.yoffset)); self.LCB.Hide()
-        self.BOMWriterCB = wx.ComboBox(
-            page1, wx.ID_ANY, choices=BOMChoices, style=wx.CB_READONLY, pos=(40, 10)
-        )
-        self.BOMWriterCB.SetValue("No BOM")
-        self.Bind(wx.EVT_COMBOBOX, self.BOMSelection, self.BOMWriterCB)
-        # self.Layout()
 
         self.WordSegments = None
         self.StepAudio = None
@@ -219,10 +290,6 @@ class Thor(wx.Frame):
         self.BKeys = None
         self.StepPIDs = None
         self.StepTools = None
-
-        self.PPTXTitleSlide = None
-        self.PPTXTitleSlideSubtitle = None
-        self.s = wx.StaticText(self, label="Status: Idle", pos=(40, 250))
 
         status = self.CreateStatusBar()
         status_font = self.GetStatusBar().GetFont()
@@ -239,8 +306,24 @@ class Thor(wx.Frame):
         self.GetStatusBar().SetFont(new_font)
         self.Show()
 
-        # Displaying Text
-        font = wx.Font(10, wx.DECORATIVE, wx.NORMAL, wx.BOLD)
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    def OnToggleLog(self, event):
+        doShow = self.showLogButton.GetValue()
+        if doShow:
+            self.logCtrl.Show()
+            self.showLogButton.SetLabel("Hide Log")
+        else:
+            self.logCtrl.Hide()
+            self.showLogButton.SetLabel("Show Log")
+        self.panel.Layout()
+
+    def OnSavePPTX(self, event):
+        savePath = self.CorePath + self.saveFileTBox.Text + ".pptx"
+        wx.LogMessage(f"Saving generated slides to {savePath}")
+        self.presMaker.Save(savePath)
+
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
     def closebutton(self, event):
         self.Close(True)
@@ -294,8 +377,8 @@ class Thor(wx.Frame):
         self.VideoPath = self.CorePath + "Videos/"
         self.SegPath = self.CorePath + "StepSegs/"
         self.AudioPath = self.CorePath + "StepSegsAudio/"
-        self.AudioWriterCB.Show()
-        self.LCB.Show()
+        # self.AudioWriterCB.Show()
+        # self.LCB.Show()
         self.Layout()
 
     def FileMover(self):
@@ -328,10 +411,12 @@ class Thor(wx.Frame):
             )  # Untoggle the button
 
     def VideoCombination(self, e):
-        self.s.SetLabel("Begin video combination/renaming.")
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        wx.LogMessage("Begin video combination/renaming.")
 
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         # logger = (self.statusbar)
-        Corepath = self.CorePath
+        # Corepath = self.CorePath
         # VideoPath=Corepath+'Videos/';self.VideoPath = VideoPath;self.SegPath = self.CorePath+'StepSegs/'#; self.AudioPath = Corepath+'StepSegsAudio/'
         VideoPath = self.VideoPath
         self.VideoCombButton.Disable()
@@ -348,10 +433,12 @@ class Thor(wx.Frame):
                     ]
                     # print(VFiles)
                     if len(VFiles) > 1:
+                        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                         wx.CallAfter(
-                            self.s.SetLabel,
+                            wx.LogMessage,
                             "Multiple videos identified. Initiate sorting sequence.",
                         )
+                        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                         SegVidInds = natsorted(VFiles)
                         #                 SegVidInds = np.argsort(np.concatenate([np.double(findall(r'\d+', i.replace('.MP4'.casefold(),'').replace(Corepath+"Videos/",''))) for i in VFiles]))
                         #                 SortedVFiles = [VideoFileClip(VideoPath+VFiles[SegVidInds[i]]) for i in range(len(SegVidInds))]
@@ -362,12 +449,12 @@ class Thor(wx.Frame):
                             self.CorePath + "StepSegs/" + "FirstFrame.jpg", t=0
                         )
                         wx.CallAfter(
-                            self.s.SetLabel, "Sorting complete. Initiate concatenation."
+                            wx.LogMessage, "Sorting complete. Initiate concatenation."
                         )
 
                         CombinedVid = concatenate_videoclips(SortedVFiles)
                         wx.CallAfter(
-                            self.s.SetLabel,
+                            wx.LogMessage,
                             "Concatenation complete. Writing video to output. Please be patient.",
                         )
 
@@ -385,16 +472,12 @@ class Thor(wx.Frame):
                         # wx.CallAfter(self.statusbar.SetStatusText, "Export Complete!")
                         # video = VideoFileClip(VideoPath+'combined.mp4')
                         wx.CallAfter(
-                            self.s.SetLabel,
+                            wx.LogMessage,
                             "Video writing complete. Now writing audio to output.",
                         )
 
                         CombinedVid.audio.write_audiofile(
                             self.CorePath + "StepSegsAudio/" + "combined.mp3"
-                        )
-                        wx.CallAfter(
-                            self.s.SetLabel,
-                            "Audio successfully embedded in video. Please proceed to next step.",
                         )
 
                         #                         CombinedVid.audio.write_audiofile(self.CorePath+'StepSegsAudio/'+"wavf_subs.wav", fps=16000, nbytes=2, codec='pcm_s16le', logger=None)
@@ -403,7 +486,7 @@ class Thor(wx.Frame):
                         CombinedVid.close()
                     if len(VFiles) == 1:
                         wx.CallAfter(
-                            self.s.SetLabel,
+                            wx.LogMessage,
                             "Single video identified. Initiate renaming logic.",
                         )
                         rename(VideoPath + VFiles[0], VideoPath + "combined.mp4")
@@ -411,20 +494,16 @@ class Thor(wx.Frame):
                         video.save_frame(
                             self.CorePath + "StepSegs/" + "FirstFrame.jpg", t=0
                         )
-                        wx.CallAfter(self.s.SetLabel, "Audio embedding start.")
+                        wx.CallAfter(wx.LogMessage, "Audio embedding start.")
                         video.audio.write_audiofile(
                             self.CorePath + "StepSegsAudio/" + "combined.mp3"
-                        )
-                        wx.CallAfter(
-                            self.s.SetLabel,
-                            "Audio embedding successful. Please proceed to next step",
                         )
                         #                 video.audio.write_audiofile(self.CorePath+'StepSegsAudio/'+"combined.wav", fps=16000, nbytes=2, codec='pcm_s16le', logger=None)
                         #                         CombinedVid.audio.write_audiofile(self.CorePath+'StepSegsAudio/'+"wavf_subs.wav", fps=16000, nbytes=2, codec='pcm_s16le', logger=None)
                         video.audio.close()
                         video.close()
                     if len(VFiles) == 0:
-                        wx.CallAfter(self.s.SetLabel, "No videos avaialable in path :(")
+                        wx.CallAfter(wx.LogMessage, "No videos avaialable in path :(")
 
                         # self.status = self.SetStatusText('No videos avaiable in path :(')  # Untoggle the button
                 else:
@@ -434,27 +513,27 @@ class Thor(wx.Frame):
                     )
                     video.close()
                     wx.CallAfter(
-                        self.s.SetLabel,
+                        wx.LogMessage,
                         "combined.mp4 already exists. Please delete or move if another instance needs to be created.",
                     )
 
                     # self.status = self.SetStatusText('combined.mp4 already exists. Please delete or move if another instance needs to be created.')  # Untoggle the button
                     wx.CallAfter(
-                        self.s.SetLabel,
+                        wx.LogMessage,
                         "Rewriting audio of existing combined.mp4 file.",
                     )
                     video = VideoFileClip(VideoPath + "combined.mp4")
                     video.audio.write_audiofile(
                         self.CorePath + "StepSegsAudio/" + "combined.mp3"
                     )
-                    wx.CallAfter(
-                        self.s.SetLabel,
-                        "Audio successfully embedded. Please proceed to next step.",
-                    )
+                wx.CallAfter(
+                    wx.LogMessage,
+                    "Audio successfully embedded. Please proceed to next step.",
+                )
 
             except Exception as e:
-                # wx.CallAfter(self.s.SetLabel, f"Error: {(AudioFile+'combined.mp3')}")
-                wx.CallAfter(self.s.SetLabel, f"Error: {str(e)}")
+                # wx.CallAfter(wx.LogMessage, f"Error: {(AudioFile+'combined.mp3')}")
+                wx.CallAfter(wx.LogMessage, f"Error: {str(e)}")
                 wx.CallAfter(self.VideoSliceButton.Enable)
 
         Thread(target=work, daemon=True).start()
@@ -521,7 +600,7 @@ class Thor(wx.Frame):
 
         self.status = self.SetStatusText("Initiating thread...")  # Untoggle the button
 
-        self.s.SetLabel("Loading & Transcribing... " + str(device))
+        wx.LogMessage("Loading & Transcribing... " + str(device))
 
         def work():
             try:
@@ -529,17 +608,17 @@ class Thor(wx.Frame):
                 device = "cpu"
                 compute_type = "int8"
                 batch_size = 1
-                wx.CallAfter(self.s.SetLabel, "Attempting to load large-v3 model.")
+                wx.CallAfter(wx.LogMessage, "Attempting to load large-v3 model.")
                 Model = whisperx.load_model(
                     "large-v3", device, compute_type=compute_type
                 )
-                wx.CallAfter(self.s.SetLabel, "Attempting to load audio.")
+                wx.CallAfter(wx.LogMessage, "Attempting to load audio.")
                 LoadedAudio = whisperx.load_audio(Path(AudioFile + "combined.mp3"))
-                wx.CallAfter(self.s.SetLabel, "Initiate transcription.")
+                wx.CallAfter(wx.LogMessage, "Initiate transcription.")
                 PreliminaryTranscription = Model.transcribe(
                     LoadedAudio, batch_size=batch_size, language="en"
                 )
-                wx.CallAfter(self.s.SetLabel, "Time projection.")
+                wx.CallAfter(wx.LogMessage, "Time projection.")
                 AlignModel, Metadata = whisperx.load_align_model(
                     language_code="en", device=device
                 )
@@ -551,92 +630,78 @@ class Thor(wx.Frame):
                     device,
                     return_char_alignments=False,
                 )
-                wx.CallAfter(self.s.SetLabel, "Begin writing.")
+                wx.CallAfter(wx.LogMessage, "Begin writing.")
                 self.WordSegments = AlignedTranscription["word_segments"]
                 wx.CallAfter(
-                    self.s.SetLabel,
+                    wx.LogMessage,
                     "Alignment sequence complete. Initiate step isolation sequence.",
                 )
                 self.FullSteps, self.StichedSteps, self.StichedTiming = (
                     self.TimeSlicer()
                 )
                 wx.CallAfter(
-                    self.s.SetLabel,
+                    wx.LogMessage,
                     "Step Isolation sequence complete. Obtaining audio slices",
                 )
+                # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                 self.StepAudio = [
                     self.AudioWriter(
                         self.StichedSteps[i],
                         self.AudioPath + "AFHeart",
                         i,
-                        self.AudioWriterCB.GetValue(),
                     )
                     for i in range(len(self.StichedSteps))
                 ]
+                # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                 wx.CallAfter(
-                    self.s.SetLabel, "Audio slices obtained. Initiate video rendering."
+                    wx.LogMessage, "Audio slices obtained. Initiate video rendering."
                 )
                 self.StepVideo = [
                     self.VideoStepWriter(self.StichedTiming[i], i)
                     for i in range(len(self.StichedTiming))
                 ]
                 wx.CallAfter(
-                    self.s.SetLabel,
+                    wx.LogMessage,
                     "Videos successfully rendered. Presentation creation initiated.",
                 )
                 if self.BOMWriterCB.GetValue() == "BOM":
-                    wx.CallAfter(self.s.SetLabel, "Extracting BOM data.")
+                    wx.CallAfter(wx.LogMessage, "Extracting BOM data.")
                     self.BOMWriter()
                     wx.CallAfter(
-                        self.s.SetLabel, "BOM data extracted. Starting presentation."
+                        wx.LogMessage, "BOM data extracted. Starting presentation."
                     )
-                    self.PresentationGenerator()
-                else:
-                    wx.CallAfter(self.s.SetLabel, "Starting presentation.")
-                    self.NoBOMPresentationGenerator()
+                # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                wx.CallAfter(wx.LogMessage, "Starting presentation.")
+                wx.CallAfter(self.AddSlides)
+                # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
                 wx.CallAfter(
-                    self.s.SetLabel,
+                    wx.LogMessage,
                     "KokoroAI Processes Complete. Thank you for your patience!",
                 )  # Thread-safe update
 
             except Exception as e:
-                # wx.CallAfter(self.s.SetLabel, f"Error: {(AudioFile+'combined.mp3')}")
-                wx.CallAfter(self.s.SetLabel, f"Error: {str(e)}")
+                # wx.CallAfter(wx.LogMessage, f"Error: {(AudioFile+'combined.mp3')}")
+                wx.CallAfter(wx.LogMessage, f"Error: {str(e)}")
                 wx.CallAfter(self.VideoSliceButton.Enable)
 
         # 2. Fire it off in a thread immediately
         Thread(target=work, daemon=True).start()
-        # self.s.SetLabel("Processing...")
+        # wx.LogMessage("Processing...")
         #         self.StepVideo = [self.VideoStepWriter(self.StichedTiming[i],i) for i in range(len(self.StichedTiming))]
         #         self.status = self.SetStatusText('Excel Gener.')  # Untoggle the button
         self.VideoSliceButton.Enable()
         self.Layout()
 
-    def AudioWriter(self, StepSegments, Tag, Index, ManualOverride):
+    def AudioWriter(self, StepSegments, Tag, Index):
         pipeline = self.nlp
-        if ManualOverride == "Original":
-            generator = pipeline(
-                StepSegments,
-                voice="af_heart",  # <= change voice here
-                speed=0.8,
-                split_pattern=r"\n+",
-            )
-        else:
-            data = read_csv(self.TextPath + "Corrected_Files.csv", encoding="latin1")
-            Changelines = data["0"].to_list()
-            tmp = [
-                sub(r" ?\[.*?\]", "", item).replace("-", " dash ")
-                for item in Changelines
-            ]
-            FText = [sub(r"(\d)", r"\1 ", i) for i in tmp]
-            generator = pipeline(
-                FText[Index],
-                voice="af_heart",  # <= change voice here
-                #             self.ChangeLines[Index], voice='af_heart', # <= change voice here
-                #                 ManualOverride, voice='af_heart', # <= change voice here
-                speed=0.8,
-                split_pattern=r"\n+",
-            )
+        generator = pipeline(
+            StepSegments,
+            voice="af_heart",  # <= change voice here
+            speed=0.8,
+            split_pattern=r"\n+",
+        )
+
         AudioClips = []
         TextClips = []
         for i, (gs, ps, audio) in enumerate(generator):
@@ -675,9 +740,11 @@ class Thor(wx.Frame):
         VideoClips.append(self.SegPath + "AFHeart" + str(Index) + ".mp4")
         self.VideoClips = VideoClips
 
-    def on_complete(self, segments):
-        self.s.SetLabel(f"Done! {len(segments)} segments found.")
-        self.VideoSliceButton.Enable()
+    # def AudioReWriter(self, Tag, Index):
+
+    # def on_complete(self, segments):
+    #    wx.LogMessage(f"Done! {len(segments)} segments found.")
+    #    self.VideoSliceButton.Enable()
 
     #     def on_start_export(self, event):
     #         self.VideoSliceButton.Disable() # Prevent multiple clicks
@@ -702,184 +769,13 @@ class Thor(wx.Frame):
     def BOMWriter(self):
         self.BOMPath = self.CorePath + "BOM/"
         BomPath = self.BOMPath
-        self.BKeys, self.StepPIDs, self.StepTools = self.standardized_excel_reader(
-            BomPath
-        )
-        self.ComponentWriter(
+        self.BKeys, self.StepPIDs, self.StepTools = StandardizedExcelReader(BomPath)
+        ComponentWriter(
             self.TextPath, "AFHeartTxt.pkl", [self.StepPIDs, self.StepTools]
         )
 
-    def ComponentWriter(self, fpath, name, comps):
-        with open(fpath + name, "wb") as f:
-            pickle.dump(comps, f)
-
-    def ComponentReader(self, fpath, name):
-        with open(fpath + name, "rb") as f:
-            comps = pickle.load(f)
-        return comps
-
-    def standardized_excel_reader(self, fpath):
-        Files = [i for i in listdir(fpath) if ".xlsm" in i or ".xlsx" in i]
-        # print(Files)
-        FullSheet = read_excel(fpath + Files[0], sheet_name=None)
-        SheetData = FullSheet.items()
-        keys, dfs = [[] for i in range(2)]
-        for key, df in SheetData:
-            keys.append(key)
-            dfs.append(df)
-
-        StepKeys, StepPIDs, StepTools = [[] for i in range(3)]
-        count = 0
-        for i in dfs:
-            if len(i["Item number"]) > 0:
-                mask = i["Item number"] == "Tool"
-                i["grouper"] = mask.cumsum()
-                ig = {
-                    group_key: group_df for group_key, group_df in i.groupby("grouper")
-                }
-                ig[1].columns = ig[1].iloc[0]
-                ig[1] = ig[1].loc[:, :"Quantity"]
-                StepKeys.append(keys[count])
-                StepPIDs.append(
-                    ig[0].dropna().reset_index(drop=True).drop(["grouper"], axis=1)
-                )
-                StepTools.append(
-                    ig[1]["Tool Description"].dropna().reset_index(drop=True)[1:]
-                )
-
-            count += 1
-        return keys, StepPIDs, StepTools
-
-    def PresentationVideoWriter(self, vid, pres, stepindex, addslide):
-        left = Cm(33.87 / 2)
-        top = Cm(0.37)
-        width = Cm(8)
-        height = Cm(6)
-        mime_type = "video/mp4"
-
-        if addslide == True:
-            sf = pres.slide_layouts[5]  # Get a title only slide layout
-            s = pres.slides.add_slide(sf)
-            Title1 = s.shapes.title
-            s.text = "Step " + str(stepindex)
-            FFPath = self.CorePath + "StepSegs/" + "FirstFrame.jpg"
-            movie_shape = s.shapes.add_movie(
-                vid,
-                left,
-                top,
-                width,
-                height,
-                mime_type=mime_type,
-                poster_frame_image=FFPath,
-            )
-        else:
-            FFPath = self.CorePath + "StepSegs/" + "FirstFrame.jpg"
-            movie_shape = pres.slides[stepindex].shapes.add_movie(
-                vid,
-                left,
-                top,
-                width,
-                height,
-                mime_type=mime_type,
-                poster_frame_image=FFPath,
-            )
-
-    def PresentationGenerator(self):
-        Subtitle = self.PPTXTitleSlideTitle.GetValue()
-        CorePath = self.PPTXTitleSlideSubtitle.GetValue()
-        PPTX_name = self.PPTXName.GetValue()
-        # Create a presentation object (or load an existing one)
-        # StepData = read_pickle(CorePath+'StepSegsTxt/'+'StepData.pkl')
-        #         if self.AudioWriterCB.GetValue() == 'Original':
-        StepData = read_pickle(self.TextPath + "AFHeartTxt.pkl")
-        #         print('Original')
-        #         else:
-        #             print(read_pickle(self.TextPath+'AFHeartTxt.pkl'))
-        #             print(self.ChangeLines)
-        #         StepData = self.ChangeLines
-        pres = pptx.Presentation()
-        # blank_slide_layout = pres.slide_layouts[6] # Get a blank slide layout
-        title_slide_layout = pres.slide_layouts[0]
-        slide = pres.slides.add_slide(title_slide_layout)
-        Title1 = slide.shapes.title
-        Title1.text = "Assembly Instruction Model"
-        subtitle = slide.placeholders[1]
-        subtitle.text = Subtitle
-        sf2 = pres.slide_layouts[5]  # Get a title only slide layout
-
-        SegInds = np.argsort(
-            np.concatenate(
-                [
-                    np.double(
-                        findall(
-                            r"\d+", i.replace(".mp4", "").replace(self.SegPath, "")[-3:]
-                        )
-                    )
-                    for i in listdir(self.SegPath)
-                    if "AFHeart" in i
-                ]
-            )
-        )
-        StepVids = listdir(self.SegPath)
-        FullStepVidPaths = [self.SegPath + i for i in StepVids if ".jpg" not in i]
-        StichedDF = DataFrame(self.StichedSteps).to_csv(
-            self.TextPath + "Uncorrected_Steps.csv"
-        )
-        VidParam = False
-        offset = 1
-        for i in range(len(StepData[0])):
-            if len(StepData[0]) == len(FullStepVidPaths):
-                self.TableWriter(StepData[0][i], pres, "Component", i + offset)
-                self.TableWriter(StepData[1][i], pres, "Tool", i + offset)
-                self.PresentationVideoWriter(
-                    FullStepVidPaths[SegInds[i]], pres, i + offset, False
-                )
-                if self.AudioWriterCB.GetValue() == "Original":
-                    self.TextWriter(self.StichedSteps[i], pres, i + offset)
-                else:
-                    data = read_csv(
-                        self.TextPath + "Corrected_Files.csv", encoding="latin1"
-                    )
-                    Changelines = data["0"].to_list()
-                    #                     self.ChangeLines = [sub(r" ?\[.*?\]","", item) for item in Changelines]
-                    self.ChangeLines = Changelines
-                    # self.status = self.SetStatusText('Rewrite requested. Please make sure to modify a file named Corrected_Files.csv, with the lines only occupying the same number of cells as the Uncorrected_Steps.csv file does.')
-                    self.TextWriter(self.ChangeLines[i], pres, i + offset)
-            else:
-                self.TableWriter(StepData[0][i], pres, "Component", i + offset)
-                self.TableWriter(StepData[1][i], pres, "Tool", i + offset)
-                #                 self.TextWriter(self.StichedSteps[i],pres,i+offset)
-                if self.AudioWriterCB.GetValue() == "Original":
-                    self.TextWriter(self.StichedSteps[i], pres, i + offset)
-                else:
-                    data = read_csv(
-                        self.TextPath + "Corrected_Files.csv", encoding="latin1"
-                    )
-                    Changelines = data["0"].to_list()
-                    #                     self.ChangeLines = [sub(r" ?\[.*?\]","", item) for item in Changelines]
-                    self.ChangeLines = Changelines
-                    self.TextWriter(self.ChangeLines[i], pres, i + offset)
-                VidParam = True
-        if VidParam == True:
-            for i in range(len(FullStepVidPaths)):
-                self.PresentationVideoWriter(
-                    FullStepVidPaths[SegInds[i]], pres, i + offset, False
-                )
-
-        pres.save(self.CorePath + PPTX_name + ".pptx")
-
-    def NoBOMPresentationGenerator(self):
-        MainTitle = self.PPTXTitleSlideTitle.GetValue()
-        Subtitle = self.PPTXTitleSlideSubtitle.GetValue()
-        PPTX_name = self.PPTXName.GetValue()
-        pres = pptx.Presentation()
-        title_slide_layout = pres.slide_layouts[0]
-        slide = pres.slides.add_slide(title_slide_layout)
-        Title1 = slide.shapes.title
-        Title1.text = MainTitle
-        subtitle = slide.placeholders[1]
-        subtitle.text = Subtitle
-
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def AddSlides(self):
         SegInds = np.argsort(
             np.concatenate(
                 [
@@ -894,130 +790,73 @@ class Thor(wx.Frame):
             )
         )
 
-        StepVids = listdir(self.SegPath)
-        FullStepVidPaths = [self.SegPath + i for i in StepVids if ".jpg" not in i]
-        offset = 1
-        StichedDF = DataFrame(self.StichedSteps).to_csv(
-            self.TextPath + "Uncorrected_Steps.csv"
+        FullStepVidPaths = [
+            self.SegPath + i for i in listdir(self.SegPath) if ".jpg" not in i
+        ]
+
+        StepData = (
+            read_pickle(self.TextPath + "AFHeartTxt.pkl")
+            if self.BOMWriterCB.GetValue() == "BOM"
+            else None
         )
-        if self.AudioWriterCB.GetValue() == "Original":
-            #             print('OG, if')
-            #             print(FullStepVidPaths)
-            #             print(SegInds)
-            for i in range(len(FullStepVidPaths)):
-                print(SegInds[i])
-                self.PresentationVideoWriter(
-                    FullStepVidPaths[SegInds[i]], pres, i + offset, True
-                )
-                self.TextWriter(self.StichedSteps[i], pres, i + offset)
-        else:
-            data = read_csv(self.TextPath + "Corrected_Files.csv", encoding="latin1")
-            Changelines = data["0"].to_list()
-            #             self.ChangeLines = [sub(r" ?\[.*?\]","", item) for item in Changelines]
-            self.ChangeLines = Changelines
-            for i in range(len(FullStepVidPaths)):
-                self.PresentationVideoWriter(
-                    FullStepVidPaths[SegInds[i]], pres, i + offset, True
-                )
-                self.TextWriter(self.ChangeLines[i], pres, i + offset)
-        pres.save(self.CorePath + PPTX_name + ".pptx")
 
-    def set_table_font_size(self, table, size_pt):
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.text_frame.paragraphs:
-                    for run in paragraph.runs:
-                        run.font.size = Pt(size_pt)
+        # StichedDF = DataFrame(self.StichedSteps).to_csv(
+        #    self.TextPath + "Uncorrected_Steps.csv"
+        # )
+        # textFileName = "Uncorrected_Steps.csv"  # if self.AudioWriterCB.GetValue() == "Original" else "Corrected_Steps.csv"
 
-    def TableWriter(self, data, pres, tabletype, stepindex):
-        if tabletype == "Component":
-            rows = data.shape[0] + 1
-            cols = data.shape[1]
-            title_only_slide_layout = pres.slide_layouts[5]
-            slide = pres.slides.add_slide(title_only_slide_layout)
-            shapes = slide.shapes
-            shapes.title.text = "Step " + str(stepindex)
+        # textData = read_csv(self.TextPath + textFileName, encoding="latin1")[
+        #    "0"
+        # ].to_list()
 
-            # rows = cols = 2
-            left = Cm(0.2)
-            top = Cm(8)
-            width = Cm(12)
-            height = Cm(0.8) * cols
-
-            table = shapes.add_table(rows, cols, left, top, width, height).table
-            for j, column_name in enumerate(data.columns):
-                table.cell(0, j).text = column_name
-
-            # Add data rows
-            for i, row_data in enumerate(data.values.tolist()):
-                for j, cell_data in enumerate(row_data):
-                    table.cell(i + 1, j).text = str(cell_data)
-            self.set_table_font_size(table, 10)
-        if tabletype == "Tool":
-            rows = data.shape[0] + 1
-            cols = 1  # data.shape[1]
-            data = DataFrame(list(data), columns=["Tools"])
-            slide = pres.slides[stepindex]
-            shapes = slide.shapes
-            shapes.title.text = "Step " + str(stepindex)
-            # shapes.title.text = 'Step '+str(stepindex-1)
-            left = Cm(12.4)
-            top = Cm(8)
-            width = Cm(12)
-            height = Cm(0.8) * cols
-            tbl = shapes.add_table(rows, cols, left, top, width, height)
-            table = tbl.table
-            # table.style ='Medium Grid 1 Accent 2' #(9DCAF9ED-07DC-4A11-8D7F-57B35C25682E)
-            # Access the underlying XML element of the table shape
-            tblf = tbl._element.graphic.graphicData.tbl
-            style_id = "{1FECB4D8-DB02-4DC6-A0A2-4F2EBAE1DC90}"
-            # Inject the style ID into the XML
-            tblf[0][-1].text = style_id
-
-            for j, column_name in enumerate(data.columns):
-                table.cell(0, j).text = column_name
-
-            # Add data rows
-            for i, row_data in enumerate(data.values.tolist()):
-                for j, cell_data in enumerate(row_data):
-                    table.cell(i + 1, j).text = str(cell_data)
-        self.set_table_font_size(table, 10)
-
-    def TextWriter(self, txt, pres, stepindex):
-        slide = pres.slides[stepindex]
-        left = Cm(0.5)
-        top = Cm(4)
-        width = Cm(16)
-        height = Cm(2)
-        txBox = slide.shapes.add_textbox(left, top, width, height)
-        tf = txBox.text_frame
-        tf.word_wrap = True
-        tf.text = txt
-        for paragraph in tf.paragraphs:
-            for run in paragraph.runs:
-                run.font.size = Pt(12)
-
-    def on_combo_selection(self, event):
-        # 4. Get the selected value
-        selected_item = event.GetEventObject().GetValue()
-        if selected_item == "Original":
-            self.status = self.SetStatusText("Raw audio transcription being used")
-        else:
-            data = read_csv(self.TextPath + "Corrected_Files.csv", encoding="latin1")
-            Changelines = data["0"].to_list()
-            #             print(Changelines)
-            self.ChangeLines = data["0"].to_list()
-            #             self.ChangeLines = [sub(r" ?\[.*?\]","", item) for item in Changelines]
-
-            #             print(self.ChangeLines)
-            self.status = self.SetStatusText(
-                "Rewrite requested. Please make sure to modify a file named Corrected_Files.csv, with the lines only occupying the same number of cells as the Uncorrected_Steps.csv file does."
+        for i in range(len(FullStepVidPaths)):
+            title = f"Step {i + 1}"
+            print(SegInds[i])
+            StepComponentData = StepData[0][i] if StepData is not None else None
+            StepToolData = (
+                DataFrame(list(StepData[1][i]), columns=["Tools"])
+                if StepData is not None
+                else None
             )
 
-    def BOMSelection(self, e):
-        # 4. Get the selected value
-        selected_item = e.GetEventObject().GetValue()
-        return selected_item
+            vidFileName = (
+                FullStepVidPaths[SegInds[i]]
+                if SegInds[i] < len(FullStepVidPaths)
+                else None
+            )
+
+            self.presMaker.AddStepSlide(
+                title,
+                self.StichedSteps[i],
+                vidFileName,
+                StepComponentData,
+                StepToolData,
+            )
+
+        self.saveFileButton.Enable()
+
+    # def on_combo_selection(self, event):
+    #    # 4. Get the selected value
+    #    selected_item = event.GetEventObject().GetValue()
+    #    if selected_item == "Original":
+    #        self.status = self.SetStatusText("Raw audio transcription being used")
+    #    else:
+    #        data = read_csv(self.TextPath + "Corrected_Files.csv", encoding="latin1")
+    #        #             print(Changelines)
+    #        self.ChangeLines = data["0"].to_list()
+    #        #             self.ChangeLines = [sub(r" ?\[.*?\]","", item) for item in Changelines]
+
+    #        #             print(self.ChangeLines)
+    #        self.status = self.SetStatusText(
+    #            "Rewrite requested. Please make sure to modify a file named Corrected_Files.csv, with the lines only occupying the same number of cells as the Uncorrected_Steps.csv file does."
+    #        )
+
+    # def BOMSelection(self, e):
+    #    # 4. Get the selected value
+    #    selected_item = e.GetEventObject().GetValue()
+    #    return selected_item
+
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 if __name__ == "__main__":
@@ -1042,4 +881,3 @@ if __name__ == "__main__":
     frame = Thor(parent=None, id=-1, nlp=pipeline)
     frame.Show()
     app.MainLoop()
-
