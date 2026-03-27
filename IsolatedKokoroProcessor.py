@@ -1049,4 +1049,3 @@ if __name__ == "__main__":
     frame = Thor(parent=None, id=-1, nlp=pipeline)
     frame.Show()
     app.MainLoop()
-

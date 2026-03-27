@@ -1,12 +1,22 @@
 from collections import defaultdict
+from pathlib import Path
+import subprocess
 
 import wx
 from wx.media import MediaCtrl, MC_NO_AUTORESIZE
 from wx.grid import Grid
 
 import pptx
-from pptx.util import Pt, Cm
-from pptx.enum.text import MSO_AUTO_SIZE, MSO_ANCHOR
+from pptx.util import Pt, Cm, Inches, Length
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.oxml import parse_xml
+from lxml import etree
+
+
+def xpath(el, query: str):
+    """Utility to query an `pptx.shapes.Shape`'s xml tree."""
+    nsmap = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main"}
+    return etree.ElementBase.xpath(el, query, namespaces=nsmap)
 
 
 def set_table_font_size(table, size_pt):
@@ -23,16 +33,154 @@ def set_text_font_size(tbox, size_pt):
             run.font.size = Pt(size_pt)
 
 
+def move_slide(pres, from_index: int, to_index: int) -> None:
+    """Move slide at position `from_index` in presentation `pres` to `to_index`"""
+    slides = list(pres.slides._sldIdLst)
+    if to_index < 0:
+        to_index = len(slides) + to_index
+    pres.slides._sldIdLst.remove(slides[from_index])
+
+    pres.slides._sldIdLst.insert(to_index, slides[from_index])
+
+
+def autoplay_media(media) -> None:
+    """
+    Utility to autoplay a media (currently only video) upon on entering the slide containing it.
+
+    Args:
+        media: `Shape` object containing the video.
+    """
+    el_id = xpath(media.element, ".//p:cNvPr")[0].attrib["id"]
+    el_cnt = xpath(
+        media.element.getparent().getparent().getparent(),
+        './/p:timing//p:video//p:spTgt[@spid="%s"]' % el_id,
+    )[0]
+    cond = xpath(el_cnt.getparent().getparent(), ".//p:cond")[0]
+    cond.set("delay", "0")
+    cond.set("evt", "onBegin")
+
+
+def get_thumbnail_from_video(movie_file: str, img_format: str = ".jpg") -> str:
+    video_input_path = Path(movie_file).resolve()
+    img_output_path = video_input_path.parent / (video_input_path.stem + img_format)
+    subprocess.call(
+        [
+            "ffmpeg",
+            "-i",
+            video_input_path,
+            "-ss",
+            "00:00:00.000",
+            "-vframes",
+            "1",
+            img_output_path,
+            "-y",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return str(img_output_path)
+
+
+def add_movie(
+    pres,
+    slide,
+    movie_file: str,
+    left: Length,
+    top: Length,
+    width: Length,
+    height: Length,
+    mime_type: str = "video/mp4",
+    poster_frame_image: str | None = None,
+    add_fullscreen: bool = True,
+    hide_fullscreen_slide: bool = True,
+):
+    """
+    Wrapper around add_movie method of a `pptx.slide.Slide` instance to add movies with functionality to toggle fullscreen mode
+
+    Args:
+        pres: the presentaion instance which contains the slide instance
+        slide: slide instance to which we add the movie
+        movie_file: path to the movie .mp4 file
+        left: X-coordinate of the movie frame's top-left corner
+        top: Y-coordinate of the movie frame's top-left corner
+        width: width of the movie frame
+        height: height of the movie frame
+        mime_type: input to the mime_type keyword argument of slide.add_movie method.
+        poster_frame_image: input to the poster_frame_image keyword argument of slide.add_movie method.
+        add_fullscreen: Whether to add fullscreen toggling feature.
+        hide_fullscreen_slide: Whether to hide the extra fullscreen slide or not. Recommend setting True if using PowerPoint and False if using Keynote.
+
+    Returns:
+        If `add_fullscreen == True`, returns a tuple of `(movie_shape, fullscreen_movie_slide)` else just returns the `movie_shape`
+    """
+
+    if add_fullscreen:
+        thn_img_path = (
+            poster_frame_image
+            if poster_frame_image is not None
+            else get_thumbnail_from_video(movie_file)
+        )
+        thn_img = slide.shapes.add_picture(thn_img_path, left, top, width, height)
+
+        fs_btn_w, fs_btn_h = Inches(1.5), Inches(0.5)
+        fs_btn_left = left + width - fs_btn_w - Inches(0.2)
+        fs_btn_top = top + height - fs_btn_h - Inches(0.2)
+
+        fs_btn = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, fs_btn_left, fs_btn_top, fs_btn_w, fs_btn_h
+        )
+        fs_btn.text = "Fullscreen"
+
+        fs_movie_slide = pres.slides.add_slide(pres.slide_layouts[6])
+        if hide_fullscreen_slide:
+            fs_movie_slide.element.set("show", "0")
+
+        movie = fs_movie_slide.shapes.add_movie(
+            movie_file,
+            0,
+            0,
+            pres.slide_width,
+            pres.slide_height,
+            mime_type=mime_type,
+            poster_frame_image=thn_img_path,
+        )
+        # movie.click_action.hyperlink.address = None
+        autoplay_media(movie)
+        fs_movie_slide.element.append(
+            parse_xml(
+                '<p:transition xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" advOnClick="0"/>'
+            )
+        )
+
+        fs_btn.click_action.target_slide = fs_movie_slide
+
+        fs_exit_btn = fs_movie_slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            pres.slide_width - fs_btn_w - Inches(0.2),
+            Inches(0.2),
+            fs_btn_h,
+            fs_btn_h,
+        )
+        fs_exit_btn.text = "X"
+        fs_exit_btn.click_action.target_slide = slide
+
+        return movie, fs_movie_slide, thn_img
+
+    movie = slide.shapes.add_movie(
+        movie_file,
+        left,
+        top,
+        width,
+        height,
+        mime_type=mime_type,
+        poster_frame_image=None,
+    )
+    return movie
+
+
 class wxShape(wx.StaticBoxSizer):
     def __init__(self, parent, orient=wx.HORIZONTAL, title=""):
         super().__init__(orient, parent, label=title)
-        # if title is not None:
-        #    self.Add(
-        #        wx.StaticText(self.StaticBox, id=wx.ID_ANY, label=title), 0, wx.ALL
-        #    )
-
-    # def SaveToSlide(self, slide, *args, **kwargs):
-    #    return slide.shapes.add_group_shape()
 
 
 class wxTextBox(wxShape):
@@ -47,7 +195,7 @@ class wxTextBox(wxShape):
 
     @Text.setter
     def Text(self, text):
-        self.textCtrl.SetValue(text)
+        self.textCtrl.ChangeValue(text)
 
     def SaveToSlide(self, slide, left, top, width, height, wrap=True, font_size=None):
         tbox = slide.shapes.add_textbox(left, top, width, height)
@@ -75,30 +223,43 @@ class wxMovieShape(wxShape):
         if file_name is not None:
             self.LoadVideo(file_name)
 
-    def LoadVideo(self, file_name):
+    def LoadVideo(self, file_name, thumbnail_file_name=None):
         self.fileName = file_name
+        self.thumbFileName = thumbnail_file_name
         status = self.movieCtrl.Load(self.fileName)
         if not status:
             raise ValueError(f"Can't load {self.fileName}, not a valid video file")
 
     def SaveToSlide(
         self,
+        pres,
         slide,
         left,
         top,
         width,
         height,
         mime_type="video/mp4",
-        poster_frame_image=None,
     ):
-        movie = slide.shapes.add_movie(
+        # return slide.shapes.add_movie(
+        #    self.fileName,
+        #    left,
+        #    top,
+        #    width,
+        #    height,
+        #    mime_type=mime_type,
+        #    poster_frame_image=self.thumbFileName,
+        # )
+
+        return add_movie(
+            pres,
+            slide,
             self.fileName,
             left,
             top,
             width,
             height,
-            mime_type=mime_type,
-            poster_frame_image=poster_frame_image,
+            mime_type,
+            poster_frame_image=self.thumbFileName,
         )
 
 
@@ -153,7 +314,7 @@ class wxTableShape(wxShape):
 
 
 class wxSlide(wx.Panel):
-    LAYOUT = 6
+    LAYOUT = 6  # BLANK SLIDE
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
@@ -183,7 +344,7 @@ class wxSlide(wx.Panel):
         self.shapes["table"].append(wxTableShape(self, *args, **kwargs))
 
     def SaveToPres(self, pres):
-        print(f"Slide: {len(pres.slides)}, layout: {self.LAYOUT}")
+        # print(f"Slide: {len(pres.slides)}, layout: {self.LAYOUT}")
         return pres.slides.add_slide(pres.slide_layouts[self.LAYOUT])
 
 
@@ -258,6 +419,7 @@ class wxStepSlide(wxTitleOnlySlide):
         movie_file_name=None,
         table_data1=None,
         table_data2=None,
+        movie_thumbnail_file_name=None,
         **kwargs,
     ):
         super().__init__(parent, **kwargs)
@@ -265,7 +427,9 @@ class wxStepSlide(wxTitleOnlySlide):
         self.shapes["textbox"][1].Text = text
 
         if movie_file_name is not None:
-            self.shapes["movie"][0].LoadVideo(movie_file_name)
+            self.shapes["movie"][0].LoadVideo(
+                movie_file_name, movie_thumbnail_file_name
+            )
 
         if table_data1 is not None:
             self.shapes["table"][0].SetFromDataframe(table_data1)
@@ -326,9 +490,11 @@ class wxStepSlide(wxTitleOnlySlide):
         tblf = toolTable._element.graphic.graphicData.tbl
         tblf[0][-1].text = "{1FECB4D8-DB02-4DC6-A0A2-4F2EBAE1DC90}"
 
-        _ = self.shapes["movie"][0].SaveToSlide(
-            slide, Cm(33.87 / 2.0), Cm(0.37), Cm(8), Cm(6)
+        movie, fs_slide, thn_img = self.shapes["movie"][0].SaveToSlide(
+            pres, slide, Cm(33.87 / 2.0), Cm(0.37), Cm(8), Cm(6)
         )
+
+        return slide, fs_slide
 
 
 class wxPresentation(wx.Notebook):
@@ -336,15 +502,32 @@ class wxPresentation(wx.Notebook):
         super().__init__(parent, **kwargs)
         self.AddPage(wxTitleSlide(self), "Setup")
 
-    def AddStepSlide(self, title, text, file_name, table1, table2):
+    def AddStepSlide(
+        self, title, text, file_name, table1, table2, movie_thumbnail_file_name=None
+    ):
         slideIdx = str(self.GetPageCount())
         self.AddPage(
-            wxStepSlide(self, title, text, file_name, table1, table2), slideIdx
+            wxStepSlide(
+                self,
+                title,
+                text,
+                file_name,
+                table1,
+                table2,
+                movie_thumbnail_file_name=movie_thumbnail_file_name,
+            ),
+            slideIdx,
         )
 
     def Save(self, destination):
         pres = pptx.Presentation()
+        hidden_slides = []
         for islide in range(self.GetPageCount()):
-            _ = self.GetPage(islide).SaveToPres(pres)
+            slide_add = self.GetPage(islide).SaveToPres(pres)
+            if isinstance(slide_add, tuple):
+                hidden_slides.append(slide_add[1])
+
+        for slide in hidden_slides:
+            move_slide(pres, pres.slides.index(slide), -1)
 
         pres.save(destination)
