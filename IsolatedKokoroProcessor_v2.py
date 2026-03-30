@@ -63,6 +63,7 @@ import ctranslate2
 from re import findall, sub
 import soundfile as sf
 from pathlib import Path
+
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from kokoro.pipeline import KPipeline
 from threading import Thread
@@ -709,9 +710,8 @@ class Thor(wx.Frame):
         for i in range(len(FullStepVidPaths)):
             title = f"Step {i + 1}"
             print(SegInds[i])
-            StepComponentData = StepData[0][i] if StepData is not None else None
-            StepToolData = (
-                DataFrame(list(StepData[1][i]), columns=["Tools"])
+            BomTableData = (
+                (StepData[0][i], DataFrame(list(StepData[1][i]), columns=["Tools"]))
                 if StepData is not None
                 else None
             )
@@ -726,8 +726,7 @@ class Thor(wx.Frame):
                 title,
                 self.StichedSteps[i],
                 vidFileName,
-                StepComponentData,
-                StepToolData,
+                BomTableData,
                 movie_thumbnail_file_name=self.CorePath + "StepSegs/FirstFrame.jpg",
             )
 

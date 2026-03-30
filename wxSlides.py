@@ -417,8 +417,6 @@ class wxStepSlide(wxTitleOnlySlide):
         title,
         text,
         movie_file_name=None,
-        table_data1=None,
-        table_data2=None,
         movie_thumbnail_file_name=None,
         **kwargs,
     ):
@@ -431,46 +429,21 @@ class wxStepSlide(wxTitleOnlySlide):
                 movie_file_name, movie_thumbnail_file_name
             )
 
-        if table_data1 is not None:
-            self.shapes["table"][0].SetFromDataframe(table_data1)
-            self.shapes["table"][0].tableCtrl.AutoSizeColumns()
-            self.shapes["table"][0].tableCtrl.AutoSizeRows()
-
-        if table_data2 is not None:
-            self.shapes["table"][1].SetFromDataframe(table_data2)
-            self.shapes["table"][1].tableCtrl.AutoSizeColumns()
-            self.shapes["table"][1].tableCtrl.AutoSizeRows()
-
     def MakeSlideLayout(self):
         mainSizer = super().MakeSlideLayout()
 
         self.AddTextBox(title="Text:", style=wx.TE_MULTILINE | wx.TE_BESTWRAP)
         self.AddMovie(title="Video:")
-        self.AddTable(title="Components:")
-        self.AddTable(title="Tool:")
 
         # for key, val in self.shapes.items():
         #    print(key, len(val))
 
-        newSizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        leftSizer = wx.BoxSizer(wx.VERTICAL)
-        leftSizer.Add(
+        topSizer = wx.BoxSizer(wx.HORIZONTAL)
+        topSizer.Add(
             self.shapes["textbox"][1], wx.SizerFlags(1).Expand().DoubleBorder()
         )
-        leftSizer.Add(self.shapes["table"][0], wx.SizerFlags(1).Expand().DoubleBorder())
-        newSizer.Add(leftSizer, wx.SizerFlags(1).Expand())
-
-        rightSizer = wx.BoxSizer(wx.VERTICAL)
-        rightSizer.Add(
-            self.shapes["movie"][0], wx.SizerFlags(1).Expand().DoubleBorder()
-        )
-        rightSizer.Add(
-            self.shapes["table"][1], wx.SizerFlags(1).Expand().DoubleBorder()
-        )
-        newSizer.Add(rightSizer, wx.SizerFlags(1).Expand())
-
-        mainSizer.Add(newSizer, wx.SizerFlags(1).Expand().Border())
+        topSizer.Add(self.shapes["movie"][0], wx.SizerFlags(1).Expand().DoubleBorder())
+        mainSizer.Add(topSizer, wx.SizerFlags(1).Expand())
 
         return mainSizer
 
@@ -479,6 +452,62 @@ class wxStepSlide(wxTitleOnlySlide):
         _ = self.shapes["textbox"][1].SaveToSlide(
             slide, Cm(0.5), Cm(4), Cm(16), Cm(2), wrap=True, font_size=12
         )
+
+        movie, fs_slide, thn_img = self.shapes["movie"][0].SaveToSlide(
+            pres, slide, Cm(33.87 / 2.0), Cm(0.37), Cm(8), Cm(6)
+        )
+
+        return slide, fs_slide
+
+
+class wxStepSlide_wBOM(wxStepSlide):
+    def __init__(
+        self,
+        parent,
+        title,
+        text,
+        table_data1,
+        table_data2,
+        movie_file_name=None,
+        movie_thumbnail_file_name=None,
+        **kwargs,
+    ):
+        super().__init__(
+            parent,
+            title,
+            text,
+            movie_file_name=movie_file_name,
+            movie_thumbnail_file_name=movie_thumbnail_file_name,
+            **kwargs,
+        )
+
+        self.shapes["table"][0].SetFromDataframe(table_data1)
+        self.shapes["table"][0].tableCtrl.AutoSizeColumns()
+        self.shapes["table"][0].tableCtrl.AutoSizeRows()
+
+        self.shapes["table"][1].SetFromDataframe(table_data2)
+        self.shapes["table"][1].tableCtrl.AutoSizeColumns()
+        self.shapes["table"][1].tableCtrl.AutoSizeRows()
+
+    def MakeSlideLayout(self):
+        mainSizer = super().MakeSlideLayout()
+
+        self.AddTable(title="Components:")
+        self.AddTable(title="Tool:")
+
+        bottomSizer = wx.BoxSizer(wx.HORIZONTAL)
+        bottomSizer.Add(
+            self.shapes["table"][0], wx.SizerFlags(1).Expand().DoubleBorder()
+        )
+        bottomSizer.Add(
+            self.shapes["table"][1], wx.SizerFlags(1).Expand().DoubleBorder()
+        )
+        mainSizer.Add(bottomSizer, wx.SizerFlags(1).Expand())
+
+        return mainSizer
+
+    def SaveToPres(self, pres):
+        slide, fs_slide = super().SaveToPres(pres)
 
         _ = self.shapes["table"][0].SaveToSlide(
             slide, Cm(0.2), Cm(8), Cm(12), Cm(2.4), font_size=10
@@ -490,10 +519,6 @@ class wxStepSlide(wxTitleOnlySlide):
         tblf = toolTable._element.graphic.graphicData.tbl
         tblf[0][-1].text = "{1FECB4D8-DB02-4DC6-A0A2-4F2EBAE1DC90}"
 
-        movie, fs_slide, thn_img = self.shapes["movie"][0].SaveToSlide(
-            pres, slide, Cm(33.87 / 2.0), Cm(0.37), Cm(8), Cm(6)
-        )
-
         return slide, fs_slide
 
 
@@ -503,21 +528,33 @@ class wxPresentation(wx.Notebook):
         self.AddPage(wxTitleSlide(self), "Setup")
 
     def AddStepSlide(
-        self, title, text, file_name, table1, table2, movie_thumbnail_file_name=None
+        self, title, text, file_name, bom_tables=None, movie_thumbnail_file_name=None
     ):
         slideIdx = str(self.GetPageCount())
-        self.AddPage(
-            wxStepSlide(
-                self,
-                title,
-                text,
-                file_name,
-                table1,
-                table2,
-                movie_thumbnail_file_name=movie_thumbnail_file_name,
-            ),
-            slideIdx,
-        )
+        if bom_tables is not None:
+            self.AddPage(
+                wxStepSlide_wBOM(
+                    self,
+                    title,
+                    text,
+                    bom_tables[0],
+                    bom_tables[1],
+                    file_name,
+                    movie_thumbnail_file_name=movie_thumbnail_file_name,
+                ),
+                slideIdx,
+            )
+        else:
+            self.AddPage(
+                wxStepSlide(
+                    self,
+                    title,
+                    text,
+                    file_name,
+                    movie_thumbnail_file_name=movie_thumbnail_file_name,
+                ),
+                slideIdx,
+            )
 
     def Save(self, destination):
         pres = pptx.Presentation()
