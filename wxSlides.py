@@ -159,6 +159,7 @@ def text_to_scrolling_video(
         f"{video_file}.mp4",
         fps=fps,
         codec="libx264",
+        audio=False,
         threads=8,
         logger=None,
         preset="veryfast",
