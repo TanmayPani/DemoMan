@@ -1,16 +1,23 @@
 from collections import defaultdict
 from pathlib import Path
 import subprocess
+import textwrap
+
+import numpy as np
 
 import wx
 from wx.media import MediaCtrl, MC_NO_AUTORESIZE
 from wx.grid import Grid
 
 import pptx
+from pptx.slide import Slide
 from pptx.util import Pt, Cm, Inches, Length
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.oxml import parse_xml
 from lxml import etree
+
+from PIL import Image, ImageDraw, ImageFont
+from moviepy import ImageClip, ColorClip, CompositeVideoClip
 
 
 def xpath(el, query: str):
@@ -79,6 +86,77 @@ def get_thumbnail_from_video(movie_file: str, img_format: str = ".jpg") -> str:
         stderr=subprocess.DEVNULL,
     )
     return str(img_output_path)
+
+
+def text_to_scrolling_video(
+    text,
+    video_file,
+    width,
+    height,
+    /,
+    *,
+    font_size=None,
+    hmargin=0,
+    speed=50,
+    fps=24,
+):
+
+    # 1. Load the Pillow Font
+    font = ImageFont.load_default(size=font_size)
+
+    # 2. Wrap the text dynamically
+    # We calculate the exact pixel width of a sample alphabet to find average char width
+    avg_char_width = font.getlength(text) / len(text)
+    hmargin += avg_char_width
+    max_chars = int((width - (2 * hmargin)) / avg_char_width)
+    wrapped_text = "\n".join(textwrap.wrap(text, width=max_chars))
+
+    # 3. Calculate the required height of the final image
+    # We use a dummy image to measure exactly how tall the text block will be
+    dummy_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    bbox = dummy_draw.multiline_textbbox((0, 0), wrapped_text, font=font)
+    text_height = bbox[3] - bbox[1]
+
+    # Add a little buffer to the bottom just to be safe
+    img_height = text_height + 50
+
+    # 4. Generate the Text Image Canvas (Transparent Background)
+    # We make the image exactly the width of the video, so X positioning is locked to 0
+    img = Image.new("RGBA", (width, img_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Draw the text! We apply the hmargin physically inside the image
+    draw.multiline_text(
+        (hmargin, 0),
+        wrapped_text,
+        font=font,
+        fill="black",
+        align="left",
+        # spacing=avg_char_width,
+    )
+
+    # 5. Send directly to MoviePy
+    # Convert Pillow Image to a NumPy array, then into a MoviePy ImageClip
+    img_array = np.asarray(img)
+    txt_clip = ImageClip(img_array)
+
+    # 6. Calculate duration and Animate
+    delta_h = img_height - height
+
+    if delta_h > 0:
+        duration = delta_h / speed
+        # We only move the Y coordinate. X stays 0 because margins are baked into the image.
+        txt_clip = txt_clip.with_position(lambda t: (0, -speed * t)).with_duration(
+            duration
+        )
+    else:
+        duration = None
+
+    bg_clip = ColorClip((width, height), color=(255, 255, 255), duration=duration)
+    # 7. Composite and Save
+    video = CompositeVideoClip([bg_clip, txt_clip])
+    video.write_videofile(f"{video_file}.mp4", fps=fps)
+    video.save_frame(f"{video_file}.png")
 
 
 def add_movie(
@@ -197,7 +275,41 @@ class wxTextBox(wxShape):
     def Text(self, text):
         self.textCtrl.ChangeValue(text)
 
-    def SaveToSlide(self, slide, left, top, width, height, wrap=True, font_size=None):
+    def SaveToSlide(
+        self,
+        slide,
+        left,
+        top,
+        width,
+        height,
+        scroll=False,
+        wrap=True,
+        font_size=None,
+        **kwargs,
+    ):
+        if scroll:
+            video_file_prefix = (
+                f"scrolling_text_{slide.slide_id}_{len(slide.shapes) + 1}"
+            )
+            text_to_scrolling_video(
+                self.Text,
+                video_file_prefix,
+                int(width.pt),
+                int(height.pt),
+                font_size=font_size,
+                **kwargs,
+            )
+
+            return slide.shapes.add_movie(
+                f"{video_file_prefix}.mp4",
+                left,
+                top,
+                width,
+                height,
+                mime_type="video/mp4",
+                poster_frame_image=f"{video_file_prefix}.png",
+            )
+
         tbox = slide.shapes.add_textbox(left, top, width, height)
         tbox.text_frame.text = self.Text
         tbox.text_frame.word_wrap = wrap
@@ -240,16 +352,6 @@ class wxMovieShape(wxShape):
         height,
         mime_type="video/mp4",
     ):
-        # return slide.shapes.add_movie(
-        #    self.fileName,
-        #    left,
-        #    top,
-        #    width,
-        #    height,
-        #    mime_type=mime_type,
-        #    poster_frame_image=self.thumbFileName,
-        # )
-
         return add_movie(
             pres,
             slide,
@@ -450,7 +552,7 @@ class wxStepSlide(wxTitleOnlySlide):
     def SaveToPres(self, pres):
         slide = super().SaveToPres(pres)
         _ = self.shapes["textbox"][1].SaveToSlide(
-            slide, Cm(0.5), Cm(4), Cm(16), Cm(2), wrap=True, font_size=12
+            slide, Cm(0.5), Cm(4), Cm(16), Cm(2), scroll=True, font_size=12
         )
 
         movie, fs_slide, thn_img = self.shapes["movie"][0].SaveToSlide(
@@ -526,6 +628,9 @@ class wxPresentation(wx.Notebook):
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self.AddPage(wxTitleSlide(self), "Setup")
+
+    def __getitem__(self, idx):
+        return self.GetPage(idx)
 
     def AddStepSlide(
         self, title, text, file_name, bom_tables=None, movie_thumbnail_file_name=None
