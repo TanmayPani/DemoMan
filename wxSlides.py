@@ -155,7 +155,14 @@ def text_to_scrolling_video(
     bg_clip = ColorClip((width, height), color=(255, 255, 255), duration=duration)
     # 7. Composite and Save
     video = CompositeVideoClip([bg_clip, txt_clip])
-    video.write_videofile(f"{video_file}.mp4", fps=fps)
+    video.write_videofile(
+        f"{video_file}.mp4",
+        fps=fps,
+        codec="libx264",
+        threads=8,
+        logger=None,
+        preset="veryfast",
+    )
     video.save_frame(f"{video_file}.png")
 
 
