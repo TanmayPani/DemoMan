@@ -1,3 +1,4 @@
+import itertools
 import wx
 import sys
 import spacy
@@ -93,43 +94,10 @@ def ComponentReader(fpath, name):
     return comps
 
 
-# def StandardizedExcelReader(fpath):
-#     Files = [i for i in listdir(fpath) if ".xlsm" in i or ".xlsx" in i]
-#     # print(Files)
-#     FullSheet = read_excel(fpath + Files[0], sheet_name=None)
-#     SheetData = FullSheet.items()
-#     keys, dfs = [[] for i in range(2)]
-#     for key, df in SheetData:
-#         keys.append(key)
-#         dfs.append(df)
-
-#     StepKeys, StepPIDs, StepTools = [[] for i in range(3)]
-#     count = 0
-#     for i in dfs:
-#         # print(keys[count])
-#         if keys[count] == 'Master_BOM':
-#             StepKeys.append(keys[count])
-#             tmp = i[1:]
-#         if keys[count] != 'Master_BOM' and keys[count]!='BOM_Export':
-#             print(keys[count])
-#             if len(i["Item number"]) > 0:
-#                 mask = i["Item number"] == "Tool"
-#                 i["grouper"] = mask.cumsum()
-#                 ig = {group_key: group_df for group_key, group_df in i.groupby("grouper")}
-#                 ig[1].columns = ig[1].iloc[0]
-#                 ig[1] = ig[1].loc[:, :"Quantity"]
-#                 StepKeys.append(keys[count])
-#                 StepPIDs.append(
-#                     ig[0].dropna().reset_index(drop=True).drop(["grouper"], axis=1)
-#                 )
-#                 StepTools.append(
-#                     ig[1]["Tool Description"].dropna().reset_index(drop=True)[1:]
-#                 )
-
-#         count += 1
-#     return StepKeys, StepPIDs, StepTools
 def StandardizedExcelReader(fpath):
-    Files = [i for i in listdir(fpath) if ".xlsm" in i or ".xlsx" in i if 'copy Copy' in i]
+    Files = [
+        i for i in listdir(fpath) if ".xlsm" in i or ".xlsx" in i if "copy Copy" in i
+    ]
     # print(Files)
     FullSheet = read_excel(fpath + Files[0], sheet_name=None)
     SheetData = FullSheet.items()
@@ -141,24 +109,26 @@ def StandardizedExcelReader(fpath):
     StepKeys, StepPIDs, StepTools = [[] for i in range(3)]
     count = 0
     for i in dfs:
-        if keys[count] == 'Master_BOM':
+        if keys[count] == "Master_BOM":
             StepKeys.append(keys[count])
             tmp = i[1:]
             StepPIDs.append(tmp)
             StepTools.append([])
         # print(keys[count])
-        if keys[count] != 'Master_BOM' and keys[count]!='BOM_Export':
+        if keys[count] != "Master_BOM" and keys[count] != "BOM_Export":
             print(keys[count])
             if len(i["Item number"]) > 0:
                 mask = i["Item number"] == "Tool"
                 i["grouper"] = mask.cumsum()
-                ig = {group_key: group_df for group_key, group_df in i.groupby("grouper")}
+                ig = {
+                    group_key: group_df for group_key, group_df in i.groupby("grouper")
+                }
                 # print(ig[1])
                 ig[1].columns = ig[1].iloc[0]
                 ig[1] = ig[1].loc[:, :"Quantity"]
-                tmpKeys = (ig[0].keys())
-                matches = [j for j in tmpKeys if 'Unnamed'.casefold() in j.casefold()]
-                matches.append('grouper')
+                tmpKeys = ig[0].keys()
+                matches = [j for j in tmpKeys if "Unnamed".casefold() in j.casefold()]
+                matches.append("grouper")
                 StepKeys.append(keys[count])
                 # print(ig[0])
                 StepPIDs.append(
@@ -173,6 +143,107 @@ def StandardizedExcelReader(fpath):
 
         count += 1
     return StepKeys, StepPIDs, StepTools
+
+
+def TimeSlicer(word_segments):
+    # word_segments = self.WordSegments
+    StartSeg = -1
+    EndSeg = -1
+    Step = []
+    for i in range(len(word_segments)):
+        if i + 2 < len(word_segments):
+            if (
+                "start" in word_segments[i]["word"].casefold()
+                and ("step" in word_segments[i + 1]["word"].casefold())
+                # and ("step" in word_segments[i + 1]["word"].casefold() or "step" in word_segments[i + 2]["word"].casefold())
+            ):
+                StartSeg = i
+            if (
+                "end" in word_segments[i]["word"].casefold()
+                or "and" in word_segments[i]["word"].casefold()
+                or "finish" in word_segments[i]["word"].casefold()
+                or "stop" in word_segments[i]["word"].casefold()
+                # ) and ("step" in word_segments[i + 1]["word"].casefold() or "step" in word_segments[i + 2]["word"].casefold()):
+            ) and ("step" in word_segments[i + 1]["word"].casefold()):
+                EndSeg = i + 3
+        if StartSeg != -1 and EndSeg != -1:
+            Step.append(word_segments[StartSeg:EndSeg])
+            StartSeg = -1
+            EndSeg = -1
+    if len(Step) == 0:
+        Step.append(word_segments)
+        StichedStep = [" ".join([j["word"] for j in i]) for i in Step]
+        # print('End Stitching. Attempting any corrections')
+        for i in StichedStep:
+            if "and step" in i.casefold() or "And step" in i.casefold():
+                i.casefold().replace("and step", "end step")
+        # print('Corrections successful!')
+        CompleteStepTiming = [Step]
+    else:
+        StichedStep = [" ".join([j["word"] for j in i]) for i in Step]
+        # print('End Stitching. Attempting any corrections')
+        for i in StichedStep:
+            if "and step" in i.casefold() or "And step" in i.casefold():
+                i.casefold().replace("and step", "end step")
+        # print('Corrections successful!')
+
+        CompleteStepTiming = [
+            [Step[i][0]["start"], Step[i][len(Step[i]) - 1]["end"]]
+            for i in range(len(Step))
+        ]
+
+    return Step, StichedStep, CompleteStepTiming
+
+
+def AudioWriter(
+    pipeline, step_text, step_word_timings, step_timing, tag, index, sample_rate=24000
+):
+    # Changelines = StepSegments
+    # tmp = sub(r" ?\[.*?\]", "", Changelines).replace("-", " dash ")
+    tmp = sub(r" ?\[.*?\]", "", step_text).replace("-", " dash ")
+    FText = [sub(r"(\d)", r"\1 ", tmp)]
+    generator = pipeline(
+        FText,
+        voice="af_heart",  # <= change voice here
+        speed=0.9,
+        split_pattern=r"\n+",
+    )
+    # print(len(step_word_timings))
+    # print(step_word_timings)
+    # for w in step_word_timings:
+    #    print(w)
+    word_start_times = [
+        word_ts["start"] for word_ts in step_word_timings if "start" in word_ts
+    ]
+
+    aligned_kkr_word_segs = []
+    total_offset = 0
+    time_margin = 0.0001
+
+    # for ikkr_pred, kkr_pred in enumerate(generator):
+    # for itoken, token in enumerate(itertools.chain.from_iterable(kkr_pred.tokens for kkr_pred in generator)):
+    kkr_pred = next(generator)
+    kkr_audio_tensor = kkr_pred.audio
+    for itoken, token in enumerate(kkr_pred.tokens):
+        if len(word_start_times) > itoken:
+            offset = round(word_start_times[itoken] * sample_rate)
+            if offset > total_offset:
+                aligned_kkr_word_segs.append(torch.zeros(offset - total_offset))
+                total_offset = offset - int(time_margin * sample_rate)
+        start_time = token.start_ts - time_margin
+        end_time = token.end_ts + time_margin
+        start_idx = round(start_time * sample_rate)
+        end_idx = round(end_time * sample_rate)
+        token_audio = kkr_audio_tensor[start_idx:end_idx]
+        total_offset += token_audio.shape[0]
+
+        aligned_kkr_word_segs.append(token_audio)
+
+    aligned_kkr_step = torch.cat(aligned_kkr_word_segs)
+    filename = tag + "FullStep" + str(index) + ".mp3"
+    sf.write(filename, aligned_kkr_step, samplerate=sample_rate)
+    return filename
+
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -273,7 +344,7 @@ class Thor(wx.Frame):
         self.TextPath = None
         self.SegPath = None
 
-        self.WordSegments = None
+        # self.WordSegments = None
         self.StepAudio = None
         self.StepVideo = None
         self.VideoClips = None
@@ -316,7 +387,7 @@ class Thor(wx.Frame):
         if not self.RerenderButton.IsEnabled():
             self.RerenderButton.Enable()
             self.Layout()
-            # self.Update() 
+            # self.Update()
 
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -370,8 +441,8 @@ class Thor(wx.Frame):
         # self.LCB.Show()
         for i in range(1, self.presMaker.GetPageCount()):
             self.presMaker.DeletePage(i)
-            self.panel.Layout()        
-            
+            self.panel.Layout()
+
     def FileMover(self):
         source_path = self.CorePath
         destination_path = self.StructurePath
@@ -410,6 +481,7 @@ class Thor(wx.Frame):
         # Corepath = self.CorePath
         # VideoPath=Corepath+'Videos/';self.VideoPath = VideoPath;self.SegPath = self.CorePath+'StepSegs/'#; self.AudioPath = Corepath+'StepSegsAudio/'
         VideoPath = self.VideoPath
+        wx.CallAfter(wx.LogMessage, VideoPath)
         self.VideoCombButton.Disable()
         self.Layout()
         # self.Update()
@@ -438,7 +510,8 @@ class Thor(wx.Frame):
                         #     VideoFileClip(VideoPath + i) for i in SegVidInds
                         # ]
                         SortedVFiles = [
-                            VideoFileClip(VideoPath + i).resized(0.5) for i in SegVidInds
+                            VideoFileClip(VideoPath + i).resized(0.5)
+                            for i in SegVidInds
                         ]
                         SortedVFiles[0].save_frame(
                             self.CorePath + "StepSegs/" + "FirstFrame.jpg", t=0
@@ -452,10 +525,10 @@ class Thor(wx.Frame):
                             wx.LogMessage,
                             "Concatenation complete. Writing video to output. Please be patient.",
                         )
-                        if self.get_best_codec() == 'h264_nvenc':
-                            preset = 'p1'
+                        if self.get_best_codec() == "h264_nvenc":
+                            preset = "p1"
                         else:
-                            preset = 'veryfast'
+                            preset = "veryfast"
                         CombinedVid.write_videofile(
                             VideoPath + "combined.mp4",
                             temp_audiofile="temp-audio.m4a",
@@ -465,7 +538,7 @@ class Thor(wx.Frame):
                             # codec="libx264",
                             threads=8,
                             logger=None,
-                            preset=preset
+                            preset=preset,
                         )
                         # CombinedVid.write_videofile(Corepath+'/Videos/combined.mp4',temp_audiofile="temp-audio.m4a", remove_temp=True, audio_codec="aac", codec="libx264",logger=logger)
                         # wx.CallAfter(self.statusbar.SetStatusText, "Export Complete!")
@@ -538,57 +611,7 @@ class Thor(wx.Frame):
         Thread(target=work, daemon=True).start()
         self.VideoCombButton.Enable()
         self.Layout()
-        # self.Update() 
-    def TimeSlicer(self):
-        word_segments = self.WordSegments
-        StartSeg = -1
-        EndSeg = -1
-        Step = []
-        for i in range(len(word_segments)):
-            if i + 2 < len(word_segments):
-                if (
-                    "start" in word_segments[i]["word"].casefold()
-                    and ("step" in word_segments[i + 1]["word"].casefold())
-                    # and ("step" in word_segments[i + 1]["word"].casefold() or "step" in word_segments[i + 2]["word"].casefold())
-                ):
-                    StartSeg = i
-                if (
-                    "end" in word_segments[i]["word"].casefold()
-                    or "and" in word_segments[i]["word"].casefold()
-                    or "finish" in word_segments[i]["word"].casefold()
-                    or "stop" in word_segments[i]["word"].casefold()
-                # ) and ("step" in word_segments[i + 1]["word"].casefold() or "step" in word_segments[i + 2]["word"].casefold()):
-                ) and ("step" in word_segments[i + 1]["word"].casefold()):
-                    EndSeg = i + 3
-            if StartSeg != -1 and EndSeg != -1:
-                Step.append(word_segments[StartSeg:EndSeg])
-                StartSeg = -1
-                EndSeg = -1
-        if len(Step) == 0:
-            Step.append(word_segments)
-            StichedStep = [" ".join([j["word"] for j in i]) for i in Step]
-            # print('End Stitching. Attempting any corrections')
-            for i in StichedStep:
-                if "and step" in i.casefold() or "And step" in i.casefold():
-                    i.casefold().replace("and step", "end step")
-            # print('Corrections successful!')
-            CompleteStepTiming = [
-                Step
-            ]
-        else:
-            StichedStep = [" ".join([j["word"] for j in i]) for i in Step]
-            # print('End Stitching. Attempting any corrections')
-            for i in StichedStep:
-                if "and step" in i.casefold() or "And step" in i.casefold():
-                    i.casefold().replace("and step", "end step")
-            # print('Corrections successful!')
-    
-            CompleteStepTiming = [
-                [Step[i][0]["start"], Step[i][len(Step[i]) - 1]["end"]]
-                for i in range(len(Step)) 
-            ]
-            
-        return Step, StichedStep, CompleteStepTiming
+        # self.Update()
 
     def TranscriptionModel(self, e: wx.CommandEvent):
         self.status = self.SetStatusText("Transcription sequence initiated.")
@@ -596,7 +619,7 @@ class Thor(wx.Frame):
             raise Exception("Please enter valid filepath")
         self.VideoSliceButton.Disable()
         self.Layout()
-        # self.Update() 
+        # self.Update()
         self.status = self.SetStatusText("Initiating thread...")  # Untoggle the button
 
         def work(isRerender, device, compute_type, batch_size):
@@ -606,57 +629,66 @@ class Thor(wx.Frame):
                     wx.CallAfter(
                         wx.LogMessage, f"Loading & Transcribing...  {str(device)}"
                     )
-                    wx.CallAfter(wx.LogMessage, "Attempting to load large-v3 model.")
-                    Model = whisperx.load_model(
+                    wx.CallAfter(
+                        wx.LogMessage, "Loading large-v3 model from whisperx..."
+                    )
+                    wspModelLargeV3 = whisperx.load_model(
                         "large-v3", device, compute_type=compute_type
                     )
-                    wx.CallAfter(wx.LogMessage, "Attempting to load audio.")
-                    LoadedAudio = whisperx.load_audio(
+                    wx.CallAfter(wx.LogMessage, "Loading audio...")
+                    loadedAudio = whisperx.load_audio(
                         Path(self.AudioPath + "combined.mp3")
                     )
-                    wx.CallAfter(wx.LogMessage, "Initiate transcription.")
-                    PreliminaryTranscription = Model.transcribe(
-                        LoadedAudio, batch_size=batch_size, language="en"
+                    wx.CallAfter(wx.LogMessage, "Initiating transcription...")
+                    initialTranscription = wspModelLargeV3.transcribe(
+                        loadedAudio, batch_size=batch_size, language="en"
                     )
-                    wx.CallAfter(wx.LogMessage, "Time projection.")
-                    AlignModel, Metadata = whisperx.load_align_model(
+                    wx.CallAfter(wx.LogMessage, "Aligining initial transcription...")
+                    alignModel, modelMetadata = whisperx.load_align_model(
                         language_code="en", device=device
                     )
-                    AlignedTranscription = whisperx.align(
-                        PreliminaryTranscription["segments"],
-                        AlignModel,
-                        Metadata,
+                    alignedTranscription = whisperx.align(
+                        initialTranscription["segments"],
+                        alignModel,
+                        modelMetadata,
                         self.AudioPath + "combined.mp3",
                         device,
                         return_char_alignments=False,
                     )
                     wx.CallAfter(wx.LogMessage, "Begin writing.")
-                    self.WordSegments = AlignedTranscription["word_segments"]
+                    # self.WordSegments = alignedTranscription["word_segments"]
                     wx.CallAfter(
                         wx.LogMessage,
                         "Alignment sequence complete. Initiate step isolation sequence.",
                     )
-                    self.FullSteps, self.StichedSteps, self.StichedTiming = (
-                        self.TimeSlicer()
+                    self.FullSteps, self.StichedSteps, self.StichedTiming = TimeSlicer(
+                        alignedTranscription["word_segments"]
                     )
                     wx.CallAfter(
                         wx.LogMessage,
                         "Step Isolation sequence complete. Obtaining audio slices",
                     )
+
                 else:
-                    self.StichedSteps=[]
+                    self.StichedSteps = []
                     for i in range(1, self.presMaker.GetPageCount()):
-                        self.presMaker.GetPage(i).shapes["movie"][0].movieCtrl.Stop()
-                        self.presMaker.GetPage(i).shapes["movie"][0].movieCtrl.Load("")
-                        self.StichedSteps.append(self.presMaker.GetPage(i).shapes["textbox"][1].Text)
+                        # self.presMaker.GetPage(i).shapes["movie"][0].movieCtrl.Stop()
+                        # self.presMaker.GetPage(i).shapes["movie"][0].movieCtrl.Load("")
+                        self.StichedSteps.append(
+                            self.presMaker.GetPage(i).shapes["textbox"][1].Text
+                        )
 
                 self.StepAudio = [
-                    self.AudioWriter(
-                        self.StichedSteps[i],
+                    AudioWriter(
+                        self.nlp,
+                        stepText,
+                        fullStep,
                         self.AudioPath + "AFHeart",
-                        i,
+                        index,
                     )
-                    for i in range(len(self.StichedSteps))
+                    for index, (stepText, fullStep) in enumerate(
+                        zip(self.StichedSteps, self.FullSteps)
+                    )
                 ]
                 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                 wx.CallAfter(
@@ -674,7 +706,7 @@ class Thor(wx.Frame):
                 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                 if isRerender:
                     wx.CallAfter(wx.LogMessage, "Rerendering videos.")
-                    
+
                     wx.CallAfter(self.ReloadVideos)
                 else:
                     wx.CallAfter(wx.LogMessage, "Starting presentation.")
@@ -705,14 +737,15 @@ class Thor(wx.Frame):
         #         self.status = self.SetStatusText('Excel Gener.')  # Untoggle the button
         self.VideoSliceButton.Enable()
         self.Layout()
-        # self.Update() 
+        # self.Update()
+
     def get_best_codec(self):
         # """Checks FFmpeg for available hardware encoders and returns the best one."""
         # try:
         #     # Get list of available encoders from FFmpeg
         #     result = subprocess.run(['ffmpeg', '-encoders'], capture_output=True, text=True)
         #     encoders = result.stdout
-            
+
         #     if 'h264_nvenc' in encoders:
         #         return 'h264_nvenc'         # NVIDIA GPU
         #     elif 'h264_videotoolbox' in encoders:
@@ -721,31 +754,8 @@ class Thor(wx.Frame):
         #         return 'h264_qsv'           # Intel QuickSync
         # except Exception:
         #     pass
-        
-        return 'libx264'  # Standard CPU fallback
-    def AudioWriter(self, StepSegments, Tag, Index):
-        pipeline = self.nlp
-        Changelines = StepSegments
-        tmp = sub(r" ?\[.*?\]","", Changelines).replace("-", " dash ")
-        FText = [sub(r'(\d)', r'\1 ', tmp)] 
-        generator = pipeline(
-            FText,
-            voice="af_heart",  # <= change voice here
-            speed=0.8,
-            split_pattern=r"\n+",
-        )
 
-        AudioClips = []
-        TextClips = []
-
-        for i, (gs, ps, audio) in enumerate(generator):
-            AudioClips.append(Tag + "Step" + str(i) + ".mp3")
-            sf.write(
-                Tag + "Step" + str(i) + ".mp3", audio, 24000
-            )  # save each audio file
-        FullAudio = concatenate_audioclips([AudioFileClip(i) for i in AudioClips])
-        FullAudio.write_audiofile(Tag + "FullStep" + str(Index) + ".mp3", 24000)
-        return Tag + "FullStep" + str(Index) + ".mp3"
+        return "libx264"  # Standard CPU fallback
 
     def VideoStepWriter(self, e, Index):
         # print('Start Video Step Writing')
@@ -753,20 +763,22 @@ class Thor(wx.Frame):
         AudioPath = self.AudioPath
         Timing = self.StichedTiming
         VideoClips = []
-                # NoSubVideo = VideoFileClip(VideoPath+'combined.mp4').without_audio()
+        # NoSubVideo = VideoFileClip(VideoPath+'combined.mp4').without_audio()
         Video = VideoFileClip(VideoPath + "combined.mp4").resized(0.5).without_audio()
         # Video = VideoFileClip(VideoPath + "combined.mp4").without_audio()
-        OGAudVideo = VideoFileClip(VideoPath + "combined.mp4").resized(0.5)#.without_audio()
+        OGAudVideo = VideoFileClip(VideoPath + "combined.mp4").resized(
+            0.5
+        )  # .without_audio()
         #         Video = CompositeVideoClip([NoSubVideo, self.subs])
 
         MiniAud = AudioFileClip(self.StepAudio[Index])
         MiniOgAudVid = OGAudVideo[Timing[Index][0] : Timing[Index][1]]
         MiniVid = Video[Timing[Index][0] : Timing[Index][1]]
         MiniVid = MiniVid.with_audio(MiniAud)
-        if self.get_best_codec() == 'h264_nvenc':
-            preset = 'p1'
+        if self.get_best_codec() == "h264_nvenc":
+            preset = "p1"
         else:
-            preset = 'veryfast'
+            preset = "veryfast"
         MiniVid.write_videofile(
             self.SegPath + "AFHeart" + str(Index) + ".mp4",
             # codec="libx264",
@@ -811,7 +823,10 @@ class Thor(wx.Frame):
         )
 
         FullStepVidPaths = [
-            self.SegPath + i for i in listdir(self.SegPath) if i[-4:] != ".jpg" if "TmpOGAud" in i
+            self.SegPath + i
+            for i in listdir(self.SegPath)
+            if i[-4:] != ".jpg"
+            if "TmpOGAud" in i
         ]
 
         StepData = (
@@ -871,7 +886,10 @@ class Thor(wx.Frame):
         #     if SegInds[i]<len(FullStepVidPaths)+1:
         #         self.DeletePage(i+1)
         FullStepVidPaths = [
-            self.SegPath + i for i in listdir(self.SegPath) if i[-4:] != ".jpg" if "TmpOGAud" not in i
+            self.SegPath + i
+            for i in listdir(self.SegPath)
+            if i[-4:] != ".jpg"
+            if "TmpOGAud" not in i
         ]
 
         for i in range(len(FullStepVidPaths)):

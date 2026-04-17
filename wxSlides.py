@@ -16,7 +16,7 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.oxml import parse_xml
 from lxml import etree
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont  # , ImageText
 from moviepy import ImageClip, ColorClip, CompositeVideoClip
 
 
@@ -91,43 +91,51 @@ def get_thumbnail_from_video(movie_file: str, img_format: str = ".jpg") -> str:
 def text_to_scrolling_video(
     text,
     video_file,
-    width,
-    height,
     /,
     *,
-    font_size=None,
+    width=454,
+    height=56,
+    font_size=20,
     hmargin=0,
     speed=50,
     fps=24,
 ):
 
+    _width = width * 2
+    _height = height * 2
+    _font_size = font_size * 2
+    _speed = speed * 2
+    _hmargin = hmargin * 2
+
     # 1. Load the Pillow Font
-    font = ImageFont.load_default(size=font_size)
+    font = ImageFont.load_default(size=_font_size)
 
     # 2. Wrap the text dynamically
     # We calculate the exact pixel width of a sample alphabet to find average char width
     avg_char_width = font.getlength(text) / len(text)
-    hmargin += avg_char_width
-    max_chars = int((width - (2 * hmargin)) / avg_char_width)
-    wrapped_text = "\n".join(textwrap.wrap(text, width=max_chars))
+    _hmargin += avg_char_width
+    max_chars = int((_width - (2 * _hmargin)) / avg_char_width)
+    wrapped_text = "\n".join(textwrap.wrap(text, width=max_chars - 2))
 
     # 3. Calculate the required height of the final image
     # We use a dummy image to measure exactly how tall the text block will be
     dummy_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
     bbox = dummy_draw.multiline_textbbox((0, 0), wrapped_text, font=font)
     text_height = bbox[3] - bbox[1]
+    text_width = bbox[2] - bbox[0]
 
     # Add a little buffer to the bottom just to be safe
-    img_height = text_height + 50
+    img_height = text_height + 2 * _font_size
+    # img_width = text_width + 2 * _hmargin
 
     # 4. Generate the Text Image Canvas (Transparent Background)
     # We make the image exactly the width of the video, so X positioning is locked to 0
-    img = Image.new("RGBA", (width, img_height), (0, 0, 0, 0))
+    img = Image.new("RGBA", (_width, img_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
     # Draw the text! We apply the hmargin physically inside the image
     draw.multiline_text(
-        (hmargin, 0),
+        (_hmargin, 0),
         wrapped_text,
         font=font,
         fill="black",
@@ -141,30 +149,33 @@ def text_to_scrolling_video(
     txt_clip = ImageClip(img_array)
 
     # 6. Calculate duration and Animate
-    delta_h = img_height - height
+    delta_h = img_height - _height
 
-    if delta_h > 0:
-        duration = delta_h / speed
-        # We only move the Y coordinate. X stays 0 because margins are baked into the image.
-        txt_clip = txt_clip.with_position(lambda t: (0, -speed * t)).with_duration(
-            duration
+    # We only move the Y coordinate. X stays 0 because margins are baked into the image.
+    txt_clip = (
+        txt_clip.with_position(lambda t: (0, -_speed * t)).with_duration(
+            delta_h / _speed
         )
-    else:
-        duration = None
+        if delta_h > 0
+        else txt_clip.with_duration(1.0 / fps)
+    )
 
-    bg_clip = ColorClip((width, height), color=(255, 255, 255), duration=duration)
+    bg_clip = ColorClip(
+        (_width, _height), color=(255, 255, 255), duration=txt_clip.duration
+    )
     # 7. Composite and Save
-    video = CompositeVideoClip([bg_clip, txt_clip])
+    video = CompositeVideoClip([bg_clip, txt_clip]).without_audio().resized(0.5)
     video.write_videofile(
         f"{video_file}.mp4",
         fps=fps,
-        codec="libx264",
-        audio=False,
-        threads=8,
-        logger=None,
-        preset="veryfast",
+        # codec="libx264",
+        # audio_codec="aac",
+        # threads=8,
+        # logger=None,
+        # preset="veryfast",
     )
     video.save_frame(f"{video_file}.png")
+    # print(wrapped_text)
 
 
 def add_movie(
@@ -297,13 +308,13 @@ class wxTextBox(wxShape):
     ):
         if scroll:
             video_file_prefix = (
-                f"scrolling_text_{slide.slide_id}_{len(slide.shapes) + 1}"
+                f"./Videos/scrolling_text_{slide.slide_id}_{len(slide.shapes) + 1}"
             )
             text_to_scrolling_video(
                 self.Text,
                 video_file_prefix,
-                int(width.pt),
-                int(height.pt),
+                width=int(width.pt),
+                height=int(height.pt),
                 font_size=font_size,
                 **kwargs,
             )
